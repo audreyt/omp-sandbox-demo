@@ -66,4 +66,4 @@ export OMP_SANDBOX=srt
 
 # The `--` before omp is load-bearing: it tells srt to stop parsing flags and forward
 # the rest to omp's arg parser. Without it, srt --version consumes omp's --version.
-exec srt --settings "$SETTINGS" -- omp "${OMP_ARGS[@]}"
+exec srt --settings "$SETTINGS" -- omp ${OMP_ARGS[@]+"${OMP_ARGS[@]}"}

@@ -10,7 +10,7 @@ This README documents the v0 design and the findings that motivated it. Every cl
 - **`knowledge/AGENTS.md`** — advisory background, written for `~/.omp/agent/AGENTS.md`. Opens once, explains *why* the barrier exists and *how* srt wraps omp.
 - **`knowledge/APPEND_SYSTEM.md`** — the same contract as a `<system>`-prompt block, alternative to `RULES.md` for users who want prompt-level instead of file-level enforcement. **Pick ONE, not both.**
 - **`extension/index.ts`** + **`extension/package.json`** — a 110-line awareness extension (`registerFlag`, `session_start` status line, `registerCommand("sandbox", ...)`). Imports `ExtensionAPI` as a type only, so omp erases it at compile time and there are zero runtime deps.
-- **`scripts/run-sandboxed.sh`** — launch wrapper. `export OMP_SANDBOX=srt` + `srt --settings ~/.srt-settings.json -- omp "$@"`. The `--` is load-bearing (see [Gotchas](#gotchas)).
+- **`scripts/run-sandboxed.sh`** — launch wrapper. `--self-test` boots omp *inside* the barrier (the assertion the prior demo lacked); `--print-settings` echoes the resolved config (`--print-profile` alias for macOS-wrapper compatibility); env-var mode generates a settings file from `OMP_SANDBOX_*` when no explicit/default file exists. It exports `OMP_SANDBOX=srt` + `OMP_SANDBOX_SETTINGS=<active-file>` and launches `srt --settings <active-file> -- omp "$@"`. The `--` is load-bearing (see [Gotchas](#gotchas)).
 - **`srt-settings.example.json`** — an illustrative config (not srt's bare default — see [Gotchas](#gotchas)). Copy to `~/.srt-settings.json`. Includes `~/.omp` in `allowWrite` so omp doesn't crash at startup.
 - **`test/smoke.sh`** — three assertions: denylisted path denied, non-denylisted path allowed, non-allowlisted host blocked. All were observed passing during v0 development.
 
@@ -37,21 +37,21 @@ The knowledge layer is primary. The runtime layer is a complement. v0 makes this
 #           npm install -g @anthropic-ai/sandbox-runtime
 #           apt-get install bubblewrap socat ripgrep curl
 
-# 2. Copy the demo's settings into place
+# 2a. Settings — pick ONE of three paths:
+#
+#   (a) Copy the demo's settings into place:
 cp srt-settings.example.json ~/.srt-settings.json
+#
+#   (b) Point --settings straight at the example (no copy needed):
+./scripts/run-sandboxed.sh --settings ./srt-settings.example.json -p "noop"
+#
+#   (c) Generate from env vars on a fresh install (no ~/.srt-settings.json — the wrapper writes a temp one):
+OMP_SANDBOX_WORKSPACE="$PWD" \
+OMP_SANDBOX_ALLOW_DOMAINS="api.anthropic.com:github.com:*.github.com:registry.npmjs.org:pypi.org" \
+./scripts/run-sandboxed.sh -p "noop"
 
-# 3. Install the awareness extension
-cp -r extension ~/.omp/agent/extensions/sandbox-aware   # then:
-omp plugin install ~/.omp/agent/extensions/sandbox-aware # registers in omp's tracker
-
-# 4. Install the knowledge layer (pick ONE contract channel — RULES.md OR APPEND_SYSTEM.md):
-cp knowledge/RULES.md           ~/.omp/agent/RULES.md           # file-level, sticky, re-attached
-# OR — not AND:
-cp knowledge/APPEND_SYSTEM.md   ~/.omp/agent/APPEND_SYSTEM.md   # prompt-level, lives in system prompt
-# Advisory background, either way:
-cp knowledge/AGENTS.md          ~/.omp/agent/AGENTS.md
-
-# 5. Smoke test the barrier
+# Either way, verify the barrier AND that omp actually boots inside it:
+./scripts/run-sandboxed.sh --self-test
 ./test/smoke.sh
 
 # 6. Launch omp under srt
@@ -79,12 +79,12 @@ When the extension is loaded, the TUI status line shows:
 🔒 Sandbox: ON — 8 domains, 3 write, 4 deny-read (srt)
 ```
 
-(Numbers come from your `~/.srt-settings.json` — `8 domains` is the demo's allowlist count; `3 write` is project root + /tmp + ~/.omp; `4 deny-read` is /etc/passwd + ~/.ssh + ~/.aws + ~/.gnupg.)
+(Numbers come from the active settings file — `OMP_SANDBOX_SETTINGS` when set, otherwise `~/.srt-settings.json`; `8 domains` is the demo's allowlist count; `3 write` is project root + /tmp + ~/.omp; `4 deny-read` is /etc/passwd + ~/.ssh + ~/.aws + ~/.gnupg.)
 
 `/sandbox` slash command is registered — **[verified]** via `omp --mode rpc -p "noop"`: the `available_commands_update` event listed 47 commands including:
 
 ```
-- sandbox | Show sandbox state. Reads OMP_SANDBOX/PI_SANDBOX and ~/.srt-settings.json. | source: extension
+- sandbox | Show sandbox state. Reads OMP_SANDBOX/PI_SANDBOX and the active srt settings file. | source: extension
 ```
 
 ## Gotchas (each verified, then documented)
@@ -120,6 +120,30 @@ The pattern `<cwd>/.omp/sandbox.json` overriding `~/.srt-settings.json` is **[un
 ### The extension is zero-runtime-deps
 
 `@oh-my-pi/pi-coding-agent` is listed as a *type-only* import (`import type { ExtensionAPI }`) and an OPTIONAL peer dep. omp erases type-only imports at compile time, so the package is never resolved at runtime. **[verified]** the extension loads cleanly with `rm -rf node_modules` and no deps installed. This dodges the omp loader's failure mode for runtime imports of `@anthropic-ai/sandbox-runtime` (see [What didn't work](#what-didnt-work)).
+
+## Known remaining surface (what this does NOT protect against, today)
+
+The launch-wrapper enforces the boundary at the OS level, but the boundary it enforces is the one in your settings. These are exploitable surfaces a deployer must accept right now unless they tighten the config:
+
+| Surface | Status | Mitigation |
+|---|---|---|
+| Network egress | All hosts in `network.allowedDomains` reachable | Keep the allowlist narrow; add hosts only when a tool genuinely needs them |
+| `~/.omp` writable | A compromised agent could modify omp's own memories/sessions | Inherent to the design — omp writes here at startup; cannot be tightened without breaking omp |
+| `/Volumes` (macOS) | Mounted drives readable | Native Seatbelt wrapper: add `(deny file-read* (subpath "/Volumes"))`; srt wrapper: add `/Volumes` to `filesystem.denyRead` |
+| Other `/Users/*` (macOS multi-user) | Readable | Single-user assumption; add `/Users/`-scoped `denyRead` if shared machine |
+| Symlink targets under `~/.omp` (macOS) | If `~/.omp` contains symlinks (e.g. iCloud sync) resolving outside it, the resolved real path may be read-*denied* by Seatbelt, OR read-*allowed* by a path-based allowlist — depending on which side of the boundary the real path lands | See [macOS symlink resolution edge](#macos-symlink-resolution-edge) below |
+
+### macOS symlink resolution edge
+
+On macOS, Seatbelt (and `sandbox-exec`-backed srt) checks the **kernel-resolved real path** of a file, not the symlink you named. A symlink inside `~/.omp` whose target lives in `/Users/.../Library/Mobile Documents` (iCloud) will be read-denied under a strict `$HOME` deny — because the real path is outside the allowlisted `~/.omp`. The deployed macOS sibling ([`~/.omp/sandbox`](https://github.com/Adornoo/omp-sandbox)) documents this exact bite under its `OMP_SANDBOX_EXTRA_READ` env var: you must re-allow the *real* target path, not `~/.omp` itself (which is already allowed).
+
+The srt side has the same shape: if your `filesystem.denyRead` denies `$HOME` and `allowWrite`/read paths are added by real paths, a symlinked `~/.omp` entry whose target resolves into a denied dir will fail reads. Fix by listing the real target path in your settings, not the symlink.
+
+### macOS sibling: `~/.omp/sandbox` (cross-cite, not a port)
+
+A working macOS-native Seatbelt wrapper for omp exists at [`~/.omp/sandbox`](https://github.com/Adornoo/omp-sandbox) (repo `Adornoo/omp-sandbox`). It is the macOS half of this demo's design — single-file bash, OS-level fork()-inheritance via `sandbox-exec`, `--self-test` that asserts omp boots under the barrier, `--print-profile` for reviewability, and env-var-only config (no settings file). This demo (Linux/srt) imported the `--self-test` and `--print-settings` patterns and the "known remaining surface" framing from it.
+
+The earlier hedge in this README under Future Work ("macOS sandbox-exec should work but verify before claiming") is no longer open: the macOS Seatbelt harness for omp is verified, shipping, and citation-worthy. If you want a macOS-native omp sandbox without srt, use `~/.omp/sandbox` directly.
 
 ## What didn't work — and why the launch-wrapper design is required
 
@@ -165,14 +189,14 @@ If you genuinely want per-command policy granularity inside an omp extension (th
 
 - **Per-command policy granularity.** The launch-wrapper design applies the same config to every bash subprocess omp spawns. Per-command toggles require in-process interception, which v0 deliberately avoids.
 - **Project-local config merge.** srt reads one config file. There is no `<cwd>/.omp/sandbox.json` override pattern.
-- **A `/sandbox` slash command that edits the config.** This demo's `/sandbox` is read-only — it surfaces the current `~/.srt-settings.json` and the `OMP_SANDBOX` env. Editing the boundary is the user's call, requires re-launch.
+- **A `/sandbox` slash command that edits the config.** This demo's `/sandbox` is read-only — it surfaces the active settings file and the `OMP_SANDBOX` env. Editing the boundary is the user's call, requires re-launch.
 - **The `--no-sandbox` flag does NOT disable the barrier.** It is registered as a no-op (the design inherits the barrier from srt; only re-launching without srt disables it).
 
 ## Future work (sketched, not in v0)
 
-- Cross-platform verification: this demo was built on Linux/aarch64 in OrbStack. macOS sandbox-exec + Linux x86_64 should both work (srt is cross-platform) but `#441` issue comments report macOS Seatbelt edge cases; verify before claiming.
+- Cross-platform verification: this demo was built on Linux/aarch64 in OrbStack. macOS sandbox-exec + Linux x86_64 should both work. **macOS is no longer an open claim** — see [macOS sibling](#macos-sibling-ompsandbox-crosscite-not-a-port): a verified macOS Seatbelt harness for omp ships at `~/.omp/sandbox`. Remaining open: Linux x86_64 + an E2E model-session test (the next item).
+- An E2E omp session test that drives a model API call under the sandbox. v0's `--self-test` now asserts `omp --version` boots under the barrier (closing the "left as an exercise" gap for the launch path); a real model session (with a valid API key in `~/.omp/agent/.env`) to confirm the barrier applies to omp-spawned bash with a real workflow is still left as an exercise.
 - The bundled-SRT-as-an-extension path for per-command policy: `bun build ./extension-with-SRT.ts --target=node --external @oh-my-pi/* --external @oh-my-pi/pi-*` produced a working 0.84MB bundle in the container. If per-command granularity matters, that's the v1 architecture; v0 documents it in [What didn't work](#what-didnt-work).
-- An E2E omp session test that drives a model API call under the sandbox. v0's smoke test exercises the barrier at the srt layer; an actual model session (with a valid API key in `~/.omp/agent/.env`) to confirm the barrier applies to omp-spawned bash with a real workflow is left as an exercise.
 
 ## Repo layout
 
@@ -189,7 +213,7 @@ If you genuinely want per-command policy granularity inside an omp extension (th
 │   ├── index.ts                     # awareness extension (no runtime deps)
 │   └── package.json                 # omp + pi manifest, optional peer @oh-my-pi/pi-coding-agent
 ├── scripts/
-│   └── run-sandboxed.sh             # OMP_SANDBOX=srt srt --settings ~/.srt-settings.json -- omp "$@"
+│   └── run-sandboxed.sh             # OMP_SANDBOX=srt OMP_SANDBOX_SETTINGS=<active> srt --settings <active> -- omp "$@"
 └── test/
     └── smoke.sh                     # barrier canaries (deny / allow / network blocked)
 ```

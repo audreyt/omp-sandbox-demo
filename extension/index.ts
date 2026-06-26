@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-const GLOBAL_SETTINGS = join(homedir(), ".srt-settings.json");
+const SETTINGS_FILE = process.env.OMP_SANDBOX_SETTINGS ?? join(homedir(), ".srt-settings.json");
 
 interface SrtSettings {
 	network?: { allowedDomains?: string[]; deniedDomains?: string[] };
@@ -35,11 +35,11 @@ interface SrtSettings {
 }
 
 function readSettings(): SrtSettings {
-	if (!existsSync(GLOBAL_SETTINGS)) return {};
+	if (!existsSync(SETTINGS_FILE)) return {};
 	try {
-		return JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+		return JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
 	} catch (e) {
-		console.error(`[sandbox-aware] could not parse ${GLOBAL_SETTINGS}: ${e}`);
+		console.error(`[sandbox-aware] could not parse ${SETTINGS_FILE}: ${e}`);
 		return {};
 	}
 }
@@ -80,7 +80,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("sandbox", {
-		description: "Show sandbox state. Reads OMP_SANDBOX/PI_SANDBOX and ~/.srt-settings.json.",
+		description: "Show sandbox state. Reads OMP_SANDBOX/PI_SANDBOX and the active srt settings file.",
 		handler: async (_args, ctx) => {
 			if (!sandboxActive) {
 				ctx.ui.notify("Sandbox OFF (launch without srt to run unbarriered).", "info");
@@ -92,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 				"Sandbox state:",
 				`  env OMP_SANDBOX/PI_SANDBOX: ${sandboxEnv}`,
 				`  --no-sandbox flag: ${noSandbox ? "set (no-op under srt launch-wrapper)" : "unset"}`,
-				`  settings file: ${GLOBAL_SETTINGS}${existsSync(GLOBAL_SETTINGS) ? "" : " (missing — srt default config in effect)"}`,
+				`  settings file: ${SETTINGS_FILE}${existsSync(SETTINGS_FILE) ? "" : " (missing — srt default config in effect)"}`,
 				"",
 				"Network:",
 				`  allowed: ${settings.network?.allowedDomains?.join(", ") || "(srt default)"}`,
@@ -105,9 +105,9 @@ export default function (pi: ExtensionAPI) {
 				"",
 				"Note: under the launch-wrapper design the barrier is enforced by the OS",
 				"on every bash subprocess omp spawns. To change the boundary, edit",
-				"~/.srt-settings.json (<cwd>/.omp/sandbox.json project-local overrides it)",
-				"and re-launch with scripts/run-sandboxed.sh. The --no-sandbox flag is a",
-				"no-op here — only re-launching without srt actually disables the barrier.",
+				"the settings file shown above and re-launch with scripts/run-sandboxed.sh.",
+				"There is no <cwd>/.omp/sandbox.json project-local merge. The --no-sandbox",
+				"flag is a no-op here — only re-launching without srt actually disables the barrier.",
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},

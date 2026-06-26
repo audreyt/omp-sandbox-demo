@@ -28,6 +28,17 @@ fi
 echo "settings: $SETTINGS"
 echo "srt:      $(command -v srt)"
 
+# 0. Baseline: srt must be able to launch a harmless command. Without this,
+# macOS sandbox-exec setup failures can look like "Operation not permitted" and
+# falsely satisfy the deny canary below.
+BASELINE_OUT="$(srt --settings "$SETTINGS" -- bash -c 'true' 2>&1 || true)"
+if [[ -n "$BASELINE_OUT" ]]; then
+  echo "FAIL: srt could not launch a baseline command. Got:" >&2
+  echo "$BASELINE_OUT" | head -3 >&2
+  exit 2
+fi
+echo "PASS: srt launches baseline command"
+
 # 1. The DENY canary: /etc/passwd is in denyRead -> srt should produce
 #    "Permission denied" (Linux/bwrap) or "Operation not permitted" (macOS/sandbox-exec).
 DENY_OUT="$(srt --settings "$SETTINGS" -- bash -c 'cat /etc/passwd 2>&1' 2>&1 || true)"

@@ -13,6 +13,7 @@ This README documents the v0 design and the findings that motivated it. Every cl
 - **`scripts/run-sandboxed.sh`** — launch wrapper. `--self-test` boots omp *inside* the barrier (the assertion the prior demo lacked); `--print-settings` echoes the resolved config (`--print-profile` alias for macOS-wrapper compatibility); env-var mode generates a settings file from `OMP_SANDBOX_*` when no explicit/default file exists. It exports `OMP_SANDBOX=srt` + `OMP_SANDBOX_SETTINGS=<active-file>` and launches `srt --settings <active-file> -- omp "$@"`. The `--` is load-bearing (see [Gotchas](#gotchas)).
 - **`srt-settings.example.json`** — an illustrative config (not srt's bare default — see [Gotchas](#gotchas)). Copy to `~/.srt-settings.json`. Includes `~/.omp` in `allowWrite` so omp doesn't crash at startup.
 - **`test/smoke.sh`** — three assertions: denylisted path denied, non-denylisted path allowed, non-allowlisted host blocked. All were observed passing during v0 development.
+- **`test/home-node-stat.sh`** — regression canary for the home-node-stat read model. Asserts `stat $HOME` and `readdir $HOME` (the property that distinguishes srt's read-OPEN-by-default model from omp-sandbox's `deny-then-reallow-$HOME` shape that produced the home-node-stat bug; see [bnivanov/omp-sandbox PR #2](https://github.com/bnivanov/omp-sandbox/pull/2)) plus a write-deny canary (a write to a non-allowlisted path must be denied). If srt's macOS backend ever regresses toward a `$HOME`-subtree blanket read-deny, both home-node assertions flip while the write canary still passes — same diagnostic shape as the omp-sandbox bug class. The write canary (not a read canary) because srt 1.0.0's macOS sandbox-exec backend honors `allowWrite` (denyAllExcept) but does NOT consistently honor `denyRead`, so a `/etc/passwd` read-deny canary was red-on-arrival on the platform this test guards. Full-green on both Linux (bubblewrap) and macOS (sandbox-exec).
 
 ## The architecture (and why it's the shape it is)
 
@@ -53,6 +54,7 @@ OMP_SANDBOX_ALLOW_DOMAINS="api.anthropic.com:github.com:*.github.com:registry.np
 # Either way, verify the barrier AND that omp actually boots inside it:
 ./scripts/run-sandboxed.sh --self-test
 ./test/smoke.sh
+./test/home-node-stat.sh          # regression canary: pins srt's read-OPEN-by-default for $HOME
 
 # 6. Launch omp under srt
 ./scripts/run-sandboxed.sh     # interactive
@@ -215,7 +217,8 @@ If you genuinely want per-command policy granularity inside an omp extension (th
 ├── scripts/
 │   └── run-sandboxed.sh             # OMP_SANDBOX=srt OMP_SANDBOX_SETTINGS=<active> srt --settings <active> -- omp "$@"
 └── test/
-    └── smoke.sh                     # barrier canaries (deny / allow / network blocked)
+    ├── smoke.sh                     # barrier canaries (deny / allow / network blocked)
+    └── home-node-stat.sh            # regression canary: pins srt read-OPEN-by-default for $HOME
 ```
 
 ## Verifying-it-yourself one-liners (all observed-passing in v0 dev)

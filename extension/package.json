@@ -1,0 +1,16 @@
+{
+  "name": "omp-sandbox-aware",
+  "version": "0.1.0",
+  "description": "Awareness-only extension for omp running under srt (sandbox-runtime). Reads OMP_SANDBOX/PI_SANDBOX, reflects sandbox state in the TUI status line, exposes /sandbox. Part of the omp-sandbox-demo launch-wrapper design — does NOT intercept bash, does NOT import SandboxManager.",
+  "type": "module",
+  "license": "CC0-1.0",
+  "author": "Audrey Tang <au@civic.ai>",
+  "omp": { "extensions": ["./index.ts"] },
+  "pi":   { "extensions": ["./index.ts"] },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": { "optional": true }
+  }
+}

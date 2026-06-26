@@ -1,0 +1,44 @@
+# Running omp under srt (sandbox-runtime)
+
+This is advisory background. It opens once at session start and does not re-attach later in long sessions — the contract that *always* applies lives in `RULES.md`; re-read it if you're unsure.
+
+## What this is
+
+`@anthropic-ai/sandbox-runtime` (`srt`, [github.com/anthropic-experimental/sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)) — confirmed resolves — is a general-purpose OS-level process wrapper from Anthropic. On macOS it uses `sandbox-exec` (Seatbelt); on Linux it uses `bubblewrap` + seccomp; Windows needs a separate `srt-win` build target. It is not Claude-Code-specific. You are running under it because `OMP_SANDBOX=srt` was set at launch.
+
+> `OMP_*` → `PI_*` env aliasing caveat: omp's `.env` parser mirrors `OMP_*` to `PI_*` for variables it reads from `~/.omp/agent/.env`. Variables passed in via the OS environment (`OMP_SANDBOX=srt omp …`, or `export OMP_SANDBOX=srt`) are NOT mirrored — `process.env.PI_SANDBOX` stays `undefined` even when `OMP_SANDBOX` is set. Code that branches on the sandbox env should read `process.env.OMP_SANDBOX ?? process.env.PI_SANDBOX`. Verified against omp v16.1.21 in an OrbStack Ubuntu 24.04 container.
+
+`omp` itself has no built-in sandbox — by default it runs bash commands as the launching user with no OS boundary. The sandbox is a property of this *launch*, not of omp. Any other omp process you spawn without `srt` will be unrestricted.
+
+## How srt wraps your bash (the launch-wrapper design)
+
+`srt` wraps the omp *process* externally — the launch is `srt --settings ~/.srt-settings.json -- omp …`. omp then spawns its bash subprocesses normally, and those subprocesses **inherit the bubblewrap/Seatbelt namespace from `fork()`** — the OS barrier applies to them automatically. There is no in-process interception, no `SandboxManager` library import from the extension, no per-command rewriting.
+
+This design was chosen deliberately. The alternative — an omp extension that imports `SandboxManager` from `@anthropic-ai/sandbox-runtime` and wraps each bash command itself — does NOT work under omp's loader as of v16.1.21: omp's compiled binary resolves `@anthropic-ai/sandbox-runtime` against an embedded in-binary copy whose resolution context lacks `@pondwader/socks5-server` (a transitive dep of SRT), and the load fails with `ResolveMessage: Cannot find module '@pondwader/socks5-server' from '.../node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/socks-proxy.js'`. The failure is NOT reproducible against plain Bun 1.3.14 or vanilla Node 22 from the same dist directory — both resolve the import fine — so it is omp-specific. No extension-side install/dep/layout/nested-copy fixes it; the launch-wrapper sidesteps it entirely. (Full session-log of this diagnosis in the README.)
+
+What this means in practice:
+
+- `stdout`/`stderr`/exit codes are unchanged from what you'd see unwrapped.
+- A *failure to spawn* (`bwrap` missing, AppArmor blocking userns, `socat` missing) is distinguishable from a sandbox *denial*: the former errors before `bash -c` runs; the latter runs and returns EPERM. Only the latter is the sandbox boundary — see `RULES.md`.
+- There is **no per-command toggle** inside your bash. `--no-sandbox` registered by the awareness extension is a *no-op* under this design — the barrier is process-inherited from `srt`, so no in-session switch can disable it. The only way to actually disable is to re-launch without `srt`.
+- `srt` also runs a mux/socks proxy on a localhost Unix socket (`/tmp/srt-mux-*.sock`) and a HTTP bridge via `socat` — confirmed by `srt --debug`. That proxy is how the allowlisted network egress is enforced; denied hosts return "could not resolve host" / "connection refused" through it.
+
+The launch wrapper is `scripts/run-sandboxed.sh` in this repo. It pins `--settings ~/.srt-settings.json` (or your override) and the `--` separator before `omp`, so omp's own arg parser gets the trailing args correctly (without `--`, `srt --version` consumes the flag instead of omp — confirmed).
+
+## Why the boundary exists
+
+Without it, a model that wants to fix "permission denied" will try `chmod`, then `sudo`, then `mount`, then disable SELinux/AppArmor — destroying the user's machine and exfiltrating or destroying credentials. The sandbox turns those escalations into honest stops. The user explicitly chose to ship under `srt` to make those escalations impossible. Respecting EPERM as the boundary is the whole point.
+
+## When to widen the boundary
+
+Widening means editing `~/.srt-settings.json` (or whatever path was passed to `srt --settings`). It is the *user's* call, not the model's. The model proposes; the user edits. Reasonable proposals:
+
+- A package lives on a registry not in the allowlist (e.g. `registry.npmjs.org` is in the demo config; a private `npm.fontawesome.com` needs adding).
+- A test command reads a fixture from `~/.config/<thing>` that's denied — propose widening `filesystem.denyRead` or moving the fixture into the project tree so no widening is needed.
+- The model needs to call a network API outside the allowlist — propose an alternative host or vendoring the response.
+
+The unreasonable proposal — and you must not make it — is "remove the sandbox / use `--no-sandbox` / disable the extension." Under launch-wrapper those are no-ops; the only real disable is re-launching without `srt`. Don't suggest it.
+
+## How to tell what's currently enforced
+
+The runtime extension in this repo (`extension/index.ts`) registers a `/sandbox` slash command that reads `~/.srt-settings.json` and prints the current `network` / `filesystem` blocks plus whether `OMP_SANDBOX=srt` is set. It reads the same single file `srt` reads — there is no "project-local merge", that pattern was a fabrication from the old pi-mono extension's own `loadConfig`, not `srt`'s behavior. If the extended session is not loaded, read `~/.srt-settings.json` directly. If unsure whether a path will fail, ask the user to check before you issue the risky command — better to ask once than to retry three times into EPERM.

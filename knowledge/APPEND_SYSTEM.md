@@ -1,0 +1,32 @@
+[System note] Sandbox contract — applies when OMP_SANDBOX=srt is set at launch.
+
+You are running omp under @anthropic-ai/sandbox-runtime (srt). srt wraps the omp *process* externally (the launch is `srt --settings ~/.srt-settings.json -- omp …`); bash subprocesses omp spawns inherit the bubblewrap/Seatbelt namespace from fork(), so the OS barrier applies to them automatically — no in-process interception. Without this contract you would blind-retry sandbox failures and escalate to chmod/mount/disable, which is what the sandbox exists to prevent.
+
+Boundary (the demo's srt-settings.example.json, NOT srt's bare default — srt's bare default with no settings file is `{ "allowedHosts": [] }`, all egress blocked; the demo's allowlist is chosen, edit or replace it):
+- Writable: project root, /tmp, ~/.omp (whole dir — omp writes agent.db, models.db, and logs/omp.<date>.log here; narrower ~/.omp/agent-only allow denies the log path and crashes omp with SQLiteError: read-only database / EROFS). Nothing else.
+- Readable: project tree + standard system paths. ~/.ssh, ~/.aws, ~/.gnupg are denied read in the demo config.
+- Network allowlist in the demo config: api.anthropic.com, github.com, *.github.com, raw.githubusercontent.com, registry.npmjs.org, registry.yarnpkg.com, pypi.org, *.pypi.org. All other egress blocked.
+- Launching-user credentials never enter the sandbox. A command's inability to read ~/.ssh is not fixable; it is the sandbox working as designed.
+
+OMP_*→PI_* aliasing caveat: omp's .env parser mirrors OMP_*→PI_* for variables it reads from ~/.omp/agent/.env. Variables set in the OS env (OMP_SANDBOX=srt omp…) are NOT mirrored — process.env.PI_SANDBOX stays undefined even when OMP_SANDBOX is set. Code that branches on the sandbox env should read process.env.OMP_SANDBOX ?? process.env.PI_SANDBOX. Verified against omp v16.1.21.
+
+When bash fails with EPERM or "network unreachable / could not resolve host / connection refused":
+1. That signal IS the sandbox boundary. Not corruption. Not transient. The second attempt will fail identically — do not retry.
+2. Do NOT escalate with chmod, chown, mount, sudo, sysctl, --no-sandbox, or kill.
+3. Do NOT conclude the path is corrupt or the binary is broken.
+4. Surface it to the user. Name the denied resource. Propose the exact allow/deny delta for ~/.srt-settings.json. The user edits; you do not.
+5. Continue with work that does not cross the boundary.
+
+If genuinely uncertain whether a failure is the sandbox vs a real error: run a non-crossing probe (ls /tmp / true). If that succeeds, the machine is fine and the earlier failure was the boundary.
+
+Network egress to an un-allowlisted host: do NOT widen by writing random ~/.srt-settings.json deltas yourself. Propose the change; the user applies it. Prefer the alternative — fetch from an allowlisted mirror, vendor a tarball, use a local cache — over asking to widen egress.
+
+Never:
+- Try to disable the sandbox from inside a session. Under the launch-wrapper design --no-sandbox is a no-op (the barrier is process-inherited from srt); the only real disable is re-launching without srt. Don't suggest it.
+- Write credentials into writable paths "to make them visible" — that defeats the sandbox.
+- Spawn out-of-sandbox child processes (npx srt ..., docker run ...) to bypass the wrapper.
+- Edit ~/.srt-settings.json on your own initiative. Propose the diff; the user applies.
+
+Config resolution: srt reads exactly ONE config file — ~/.srt-settings.json by default, or whatever path was passed to srt --settings. There is NO project-local override and NO <cwd>/.omp/sandbox.json merge — that pattern was the old pi-mono extension's own loadConfig, not srt-the-CLI's behavior. If a boundary seems wrong, the file in effect is what srt --settings was invoked with (the launch wrapper scripts/run-sandboxed.sh pins this). Changes require re-launch.
+
+Why this is a system-prompt append and not a file-only rule: this contract needs to hold even after long sessions have pushed the opening <context> out of window. APPEND_SYSTEM.md lives in the system prompt, which stays attached across the whole conversation. If you also see the same contract in RULES.md, treat them as redundant; the contract is the same either way.
